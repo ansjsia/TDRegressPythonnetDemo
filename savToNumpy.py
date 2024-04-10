@@ -17,44 +17,52 @@ from System.Collections.Generic import List
 from OpenTDv241 import *
 from OpenTDv241.Results.Dataset import *
 
-# Data subtype string to object map
-dataSubtypeMap = {
-    "T": StandardDataSubtypes.T,
-    "TL": StandardDataSubtypes.TL,
-    "PL": StandardDataSubtypes.PL,
-    "AL": StandardDataSubtypes.AL,
-    "XL": StandardDataSubtypes.XL,
-}
-
 def savToNumpy(
         saveFile: SaveFile,
         submodel: str,
-        dataSubtypes: list[str],
-        thermal: bool = True,
+        dataSubtypeNames: list[str],
     ):
-    if thermal:
+    # Determine if current submodel is thermal or fluid
+    thermalSubmodels = list(saveFile.GetThermalSubmodels())
+    fluidSubmodels = list(saveFile.GetFluidSubmodels())
+
+    if submodel in thermalSubmodels:
         dataType = DataTypes.NODE
-    else:
+    elif submodel in fluidSubmodels:
         dataType = DataTypes.LUMP
+    else:
+        raise IndexError(
+            f"Submodel {submodel} is neither a thermal nor fluid submodel.\n" +
+            f"Valid submodel names are:\n" +
+            f"Thermal submodels: {thermalSubmodels}\n" +
+            f"Fluid submodels: {fluidSubmodels}\n" 
+        )
 
     itemIDs = ItemIdentifierCollection(dataType, submodel, saveFile)
 
     # Extract data
     data = {"units": {}}
-    for dataSubtype in dataSubtypes:
+    for dataSubtypeName in dataSubtypeNames:
         # Raw data
-        dataWrapper = saveFile.GetData(
-            itemIDs,
-            DataSubtype(dataSubtypeMap[dataSubtype])
-        )
+        dataSubtype = DataSubtype(FullStandardDataSubtype(dataSubtypeName))
+        dataWrapper = saveFile.GetData(itemIDs, dataSubtype)
         dataValues = dataWrapper.GetValues()
-        data[dataSubtype] = np.array(dataValues)
+        dataIDs = [
+            dataID.ToString() for dataID in
+            dataWrapper.SourceDataItemIdentifiers
+        ]
+
+        # Each row is a node/lump, each column is a timestep
+        data[dataSubtypeName] = np.array(dataValues)
+        data[dataSubtypeName+"-names"] = np.array(dataIDs)
 
         # Units
         dataDim = dataWrapper.Dimension
-        data["units"][dataSubtype] = Units.WorkingUnits.GetUnitsName(dataDim)
+        data["units"][dataSubtypeName] = Units.WorkingUnits.GetUnitsName(dataDim)
     
     # Extract time
+    # TODO: Better to make this into a class with named fields. Dictionary as
+    # quick-and-dirty solution for now.
     data["time"] = np.array(saveFile.GetTimes().GetValues())
     
     return data
@@ -72,21 +80,36 @@ canonSav = SaveFile(str(canonSavPath))
 testSav = SaveFile(str(testSavPath))
 
 # Extract values
-canonData = savToNumpy(canonSav, submodel, compareTypes, thermal=False)
-testData = savToNumpy(testSav, submodel, compareTypes, thermal=False)
+canonData = savToNumpy(canonSav, submodel, compareTypes)
+testData = savToNumpy(testSav, submodel, compareTypes)
 
 # Plot example
-t = canonData["time"]
-for i, tdType in enumerate(compareTypes):
-    canonMean = np.mean(canonData[tdType], 0)
-    testMean = np.mean(testData[tdType], 0)
-    units = canonData["units"][tdType]
+# t = canonData["time"]
+# for i, tdType in enumerate(compareTypes):
+#     canonMean = np.mean(canonData[tdType], 0)
+#     testMean = np.mean(testData[tdType], 0)
+#     units = canonData["units"][tdType]
 
-    plt.figure(i + 1)
-    plt.plot(t, canonMean)
-    plt.plot(t, testMean, ':')
-    plt.legend(["Canonical", "Test"])
-    plt.title(f"Mean {tdType} of {submodel} submodel")
-    plt.xlabel("Time [s]")
-    plt.ylabel(f"{tdType} [{units}]")
-plt.show()
+#     plt.figure(i + 1)
+#     plt.plot(t, canonMean)
+#     plt.plot(t, testMean, ':')
+#     plt.legend(["Canonical", "Test"])
+#     plt.title(f"Mean {tdType} of {submodel} submodel")
+#     plt.xlabel("Time [s]")
+#     plt.ylabel(f"{tdType} [{units}]")
+# plt.show()
+
+# Get exceedances
+absDiff = {}
+for tdType in compareTypes:
+    absDiff[tdType] = np.abs(1 - testData[tdType]/canonData[tdType])
+    exceedanceIdx = absDiff[tdType] > tolerance
+    maxDiffIdx = np.unravel_index(
+        absDiff[tdType].argmax(), absDiff[tdType].shape
+    )
+
+    print(
+        f"Maximum difference at {testData[tdType+'-names'][maxDiffIdx[0]]}, " + 
+        f"time = {testData['time'][maxDiffIdx[1]]}: " + 
+        f"{absDiff[tdType][maxDiffIdx]*100:.2g}%"
+    )
